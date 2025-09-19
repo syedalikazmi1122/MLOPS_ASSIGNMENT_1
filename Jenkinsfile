@@ -11,7 +11,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    dockerImage = docker.build("kazmi11/MLOPS_Assignment_1:${BUILD_NUMBER}")
+                    dockerImage = docker.build("kazmi11/mlops-assignment-1:${BUILD_NUMBER}")
                 }
             }
         }
