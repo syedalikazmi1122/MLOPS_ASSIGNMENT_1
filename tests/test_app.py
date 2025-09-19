@@ -42,9 +42,9 @@ def test_lightgbm_predict_input_validation(mock_load, client):
     mock_encoders['status'].transform.return_value = [0]
     mock_encoders['city'].transform.return_value = [0]
     mock_encoders['state'].transform.return_value = [0]
-    
+
     mock_load.side_effect = lambda path: mock_model if 'model' in path else mock_encoders
-    
+
     payload = {
         "status": "for sale",
         "city": "los angeles",
