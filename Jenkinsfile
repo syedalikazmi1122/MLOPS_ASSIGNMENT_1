@@ -11,7 +11,7 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    dockerImage = docker.build("kazmi11/mlops-assignment-1:${BUILD_NUMBER}")
+                    sh 'docker build -t kazmi11/mlops-assignment-1:${BUILD_NUMBER} .'
                 }
             }
         }
@@ -20,7 +20,7 @@ pipeline {
             steps {
                 script {
                     docker.withRegistry('https://index.docker.io/v1/', '5ca9f9f2-544d-406d-8d26-54187727283c') {
-                        dockerImage.push()
+                        sh 'docker push kazmi11/mlops-assignment-1:${BUILD_NUMBER}'
                     }
                 }
             }
