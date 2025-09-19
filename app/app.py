@@ -1,103 +1,126 @@
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score, mean_squared_error
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+import traceback
 import joblib
-from google.colab import files
+import pandas as pd
+import numpy as np
+import os
+from difflib import get_close_matches
 
-# Load dataset
-df = pd.read_csv("./realtor-data.zip.csv")
+app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# Data cleaning
-print("Cleaning data...")
-print("\nInitial Dataset Info:")
-print(df.info())
+# Resolve artifact paths relative to this file
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LIGHTGBM_MODEL_PATH = os.path.join(BASE_DIR, 'lightgbm_model.pkl')
+LIGHTGBM_ENCODERS_PATH = os.path.join(BASE_DIR, 'lightgbm_label_encoders.pkl')
 
-df.dropna(inplace=True)
-
-# Encode categorical columns
+# Load encoders once for parameters endpoint; model can be lazy-loaded in handler
 label_cols = ['status', 'city', 'state']
-label_encoders = {}
-for col in label_cols:
-    le = LabelEncoder()
-    df[col] = le.fit_transform(df[col].astype(str))
-    label_encoders[col] = le
-
-# Create new features
-df["price_per_sqft"] = df["price"] / df["house_size"]
-df["total_rooms"] = df["bed"] + df["bath"]
-
-# Select features and target
-features = [
-    'bed', 'bath', 'acre_lot', 'city', 'state',
-    'house_size', 'price_per_sqft', 'total_rooms'
-]
-target = 'price'
-
-# Sample 2.2 million examples
-if len(df) > 2_200_000:
-    df = df.sample(n=2_200_000, random_state=42)
-
-X = df[features]
-y = df[target]
-
-# Feature Scaling
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# Split into Train (70%), Val (20%), Test (10%)
-X_temp, X_test, y_temp, y_test = train_test_split(
-    X_scaled, y, test_size=0.1, random_state=42
-)
-X_train, X_val, y_train, y_val = train_test_split(
-    X_temp, y_temp, test_size=2/9, random_state=42
-)
-
-print(f"\nTrain size: {len(X_train)}, "
-      f"Val size: {len(X_val)}, "
-      f"Test size: {len(X_test)}")
-
-# Train Random Forest model
-model = RandomForestRegressor(n_estimators=100, random_state=42)
-model.fit(X_train, y_train)
+try:
+    lightgbm_label_encoders = joblib.load(LIGHTGBM_ENCODERS_PATH)
+except Exception:
+    lightgbm_label_encoders = None
 
 
-# Evaluate function
-def evaluate(split_name, y_true, y_pred):
-    r2 = r2_score(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    print(f"{split_name} R² Score: {r2:.4f}, MSE: {mse:.2f}")
+def fuzzy_encode(value, le, field_name):
+    if not isinstance(value, str) or value.strip() == "":
+        raise ValueError(f"{field_name} is missing or invalid.")
+
+    value_lower = value.strip().lower()
+    matches = get_close_matches(value_lower, [v.lower() for v in le.classes_], n=1, cutoff=0.5)
+
+    if matches:
+        original_value = next((v for v in le.classes_ if v.lower() == matches[0]), None)
+        if original_value:
+            return le.transform([original_value])[0]
+
+    raise ValueError(f"Unrecognized {field_name}: '{value}' (try something like '{le.classes_[0]}')")
 
 
-print("\nEvaluation:")
-evaluate("Train", y_train, model.predict(X_train))
-evaluate("Validation", y_val, model.predict(X_val))
-evaluate("Test", y_test, model.predict(X_test))
+@app.route('/api/parameters', methods=['GET'])
+def get_parameters():
+    if lightgbm_label_encoders is None:
+        return jsonify({"error": "Encoders not available"}), 500
+    return jsonify({
+        "status": list(lightgbm_label_encoders['status'].classes_),
+        "cities": list(lightgbm_label_encoders['city'].classes_),
+        "states": list(lightgbm_label_encoders['state'].classes_)
+    })
 
-# Save components
-joblib.dump(model, 'forest_model.pkl')
-joblib.dump(scaler, 'forest_scaler.pkl')
-joblib.dump(label_encoders, 'forest_label_encoders.pkl')
 
-# Predictions and Plot
-y_pred_test = model.predict(X_test)
-plt.figure(figsize=(8, 6))
-plt.scatter(y_test, y_pred_test, alpha=0.3, color='teal')
-plt.xlabel("Actual Price")
-plt.ylabel("Predicted Price")
-plt.title("Actual vs Predicted House Prices (Test Set)")
-plt.plot(
-    [y_test.min(), y_test.max()],
-    [y_test.min(), y_test.max()],
-    'r--'
-)
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+@app.route('/api/lightgbmpredict', methods=['POST'])
+def lightgbm_predict():
+    try:
+        data = request.get_json()
+        input_df = pd.DataFrame([data])
 
-# Download files
-files.download('forest_model.pkl')
-files.download('forest_scaler.pkl')
-files.download('forest_label_encoders.pkl')
+        lightgbm_model = joblib.load(LIGHTGBM_MODEL_PATH)
+        encoders = lightgbm_label_encoders or joblib.load(LIGHTGBM_ENCODERS_PATH)
+
+        for col in label_cols:
+            input_df[col] = fuzzy_encode(input_df[col].iloc[0], encoders[col], col)
+
+        input_df['house_size'] = pd.to_numeric(input_df['house_size'], errors='coerce')
+        input_df['acre_lot'] = pd.to_numeric(input_df['acre_lot'], errors='coerce')
+        input_df['bed'] = pd.to_numeric(input_df['bed'], errors='coerce').fillna(0)
+        input_df['bath'] = pd.to_numeric(input_df['bath'], errors='coerce').fillna(0)
+        input_df['zip_code'] = pd.to_numeric(input_df['zip_code'], errors='coerce').fillna(0)
+
+        input_df['log_house_size'] = np.log1p(input_df['house_size'])
+        input_df['log_acre_lot'] = np.log1p(input_df['acre_lot'])
+        input_df['bed_bath'] = input_df['bed'] * input_df['bath']
+        input_df['zip_status'] = input_df['zip_code'] * input_df['status']
+
+        lightgbm_features = [
+            'status', 'bed', 'bath', 'city', 'state', 'zip_code',
+            'log_house_size', 'log_acre_lot', 'bed_bath', 'zip_status'
+        ]
+
+        input_data = input_df[lightgbm_features]
+        predicted_log_price = lightgbm_model.predict(input_data)[0]
+        predicted_price = float(np.expm1(predicted_log_price))
+
+        bed_value = int(input_df['bed'].iloc[0])
+        comparables_result = []
+        for bed_delta in [-1, 1]:
+            c = data.copy()
+            c['bed'] = max(1, bed_value + bed_delta)
+            c['house_size'] = int(data['house_size'] * (1 + 0.05 * bed_delta))
+
+            c_df = pd.DataFrame([c])
+            for col in label_cols:
+                c_df[col] = fuzzy_encode(c_df[col].iloc[0], encoders[col], col)
+
+            c_df['house_size'] = pd.to_numeric(c_df['house_size'], errors='coerce')
+            c_df['acre_lot'] = pd.to_numeric(c_df['acre_lot'], errors='coerce')
+            c_df['bed'] = pd.to_numeric(c_df['bed'], errors='coerce').fillna(0)
+            c_df['bath'] = pd.to_numeric(c_df['bath'], errors='coerce').fillna(0)
+            c_df['zip_code'] = pd.to_numeric(c_df['zip_code'], errors='coerce').fillna(0)
+
+            c_df['log_house_size'] = np.log1p(c_df['house_size'])
+            c_df['log_acre_lot'] = np.log1p(c_df['acre_lot'])
+            c_df['bed_bath'] = c_df['bed'] * c_df['bath']
+            c_df['zip_status'] = c_df['zip_code'] * c_df['status']
+
+            comp_pred_log = lightgbm_model.predict(c_df[lightgbm_features])[0]
+            comp_pred_price = float(np.expm1(comp_pred_log))
+            comparables_result.append({
+                "location": f"{c['city']} · {c['house_size']} sqft",
+                "value": comp_pred_price
+            })
+
+        return jsonify({
+            "predicted_price": predicted_price,
+            "comparableProperties": comparables_result
+        })
+
+    except ValueError as ve:
+        return jsonify({"error": str(ve)}), 400
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5001)
