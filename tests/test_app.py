@@ -41,4 +41,3 @@ def test_lightgbm_predict_input_validation(client):
                            content_type='application/json')
     # Depending on whether artifacts exist locally, either 200 or 500 is acceptable
     assert response.status_code in (200, 400, 500)
-
